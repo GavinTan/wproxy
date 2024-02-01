@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"flag"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 type config struct {
 	Addr   string // 监听地址
 	Port   string // 监听端口
+	Auth   string // 认证账号密码
 	TProxy bool   // 透明代理模式
 	Debug  bool   // 调试模式
 }
@@ -83,10 +85,24 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
+func checkAuth(auth string) bool {
+	c := strings.SplitN(auth, " ", 2)
+	if len(c) != 2 || c[0] != "Basic" {
+		return false
+	}
+	payload, err := base64.StdEncoding.DecodeString(c[1])
+	if err != nil {
+		return false
+	}
+
+	return string(payload) == Cfg.Auth
+}
+
 func init() {
 	flag.StringVar(&Cfg.Addr, "addr", "0.0.0.0", "监听地址")
 	flag.StringVar(&Cfg.Port, "port", "8888", "监听端口")
-	flag.BoolVar(&Cfg.TProxy, "tproxy", false, "透明代理模式（能获取真实客户端IP）")
+	flag.StringVar(&Cfg.Auth, "a", "", "启用认证，用户名:密码 (tt:123)")
+	flag.BoolVar(&Cfg.TProxy, "tproxy", false, "透明代理模式 (能获取真实客户端IP)")
 	flag.BoolVar(&Cfg.Debug, "debug", false, "调试模式显示更多信息")
 	flag.Parse()
 }
@@ -95,11 +111,22 @@ func main() {
 	server := &http.Server{
 		Addr: Cfg.Addr + ":" + Cfg.Port,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Authorization
+			if Cfg.Auth != "" {
+				auth := r.Header.Get("Proxy-Authorization")
+				if auth == "" || !checkAuth(auth) {
+					w.Header().Set("Proxy-Authenticate", `Basic realm="WProxy Basic Authentication"`)
+					http.Error(w, "Authorization required", http.StatusProxyAuthRequired)
+					return
+				}
+			}
+
 			if r.Method == http.MethodConnect {
 				handleTunneling(w, r)
 			} else {
 				handleHTTP(w, r)
 			}
+
 		}),
 		// Disable HTTP/2.
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
